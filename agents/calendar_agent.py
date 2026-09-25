@@ -1,95 +1,154 @@
+from agents.extractor import (
+    extract_calendar_parameters,
+    extract_reminder_parameters
+)
+
 from tools.calendar_tools import (
     search_calendar,
     create_reminder
 )
 
+from tools.date_tools import resolve_date
 
-# ============================================================
-# Calendar Agent
-# ============================================================
 
-def handle_calendar_action(action: str):
+def handle_calendar_action(action: str, state=None):
 
     action_lower = action.lower()
 
+    # ============================================================
+    # CALENDAR SEARCH
+    # ============================================================
 
-    # --------------------------------------------------------
-    # Find meeting
-    # --------------------------------------------------------
+    if (
+        "find" in action_lower
+        or "search" in action_lower
+        or "look" in action_lower
+        or "check" in action_lower
+    ) and (
+        "meeting" in action_lower
+        or "event" in action_lower
+        or "appointment" in action_lower
+        or "calendar" in action_lower
+    ):
 
-    if "find" in action_lower and "meeting" in action_lower:
+        parameters = extract_calendar_parameters(action)
 
-        # For our current demo, we know the request contains
-        # Rahul and tomorrow.
-        #
-        # We will make this more general later.
-
-        if "rahul" in action_lower:
-
-            events = search_calendar(
-                "Rahul",
-                "2026-09-18"
-            )
-
+        if not parameters.person:
             return {
-                "type": "calendar_search",
-                "events": events
+                "type": "calendar_error",
+                "error": "Calendar search requires a person."
             }
 
+        if not parameters.date_reference:
+            return {
+                "type": "calendar_error",
+                "error": "Calendar search requires a date."
+            }
 
-    # --------------------------------------------------------
-    # Create reminder
-    # --------------------------------------------------------
+        try:
+            date = resolve_date(parameters.date_reference)
 
-    if "reminder" in action_lower:
+        except ValueError as e:
+            return {
+                "type": "calendar_error",
+                "error": str(e)
+            }
 
-        # In the current demo we use the Rahul meeting.
         events = search_calendar(
-            "Rahul",
-            "2026-09-18"
+            person=parameters.person,
+            date=date
         )
 
-        if not events:
+        return {
+            "type": "calendar_search",
+            "parameters": parameters.model_dump(),
+            "resolved_date": date,
+            "events": events
+        }
 
+    # ============================================================
+    # REMINDER
+    # ============================================================
+
+    if (
+        "reminder" in action_lower
+        or "remind" in action_lower
+    ):
+
+        reminder_parameters = extract_reminder_parameters(action)
+
+        # --------------------------------------------------------
+        # First try to use the event already found by a previous
+        # execution step.
+        # --------------------------------------------------------
+
+        event = None
+
+        if state is not None:
+            event = state.get("calendar_event")
+
+        # --------------------------------------------------------
+        # If there is no previous event, try extracting one from
+        # the current action.
+        #
+        # This is useful for standalone reminder requests.
+        # --------------------------------------------------------
+
+        if event is None:
+
+            calendar_parameters = extract_calendar_parameters(action)
+
+            if calendar_parameters.person and calendar_parameters.date_reference:
+
+                try:
+                    date = resolve_date(
+                        calendar_parameters.date_reference
+                    )
+
+                except ValueError as e:
+                    return {
+                        "type": "calendar_error",
+                        "error": str(e)
+                    }
+
+                events = search_calendar(
+                    person=calendar_parameters.person,
+                    date=date
+                )
+
+                if events:
+                    event = events[0]
+
+        # --------------------------------------------------------
+        # No event available
+        # --------------------------------------------------------
+
+        if event is None:
             return {
-                "type": "error",
-                "message": "Meeting not found."
+                "type": "calendar_error",
+                "error": (
+                    "Reminder requires a previously identified "
+                    "calendar event."
+                )
             }
 
-        event = events[0]
+        # --------------------------------------------------------
+        # Create reminder
+        # --------------------------------------------------------
 
         reminder = create_reminder(
             event,
-            minutes_before=30
+            minutes_before=reminder_parameters.minutes_before
         )
 
         return {
             "type": "reminder_created",
+            "parameters": reminder_parameters.model_dump(),
+            "event": event,
             "reminder": reminder
         }
 
-
-    # --------------------------------------------------------
-    # Unsupported action
-    # --------------------------------------------------------
-
     return {
-        "type": "error",
-        "message": f"Unsupported calendar action: {action}"
+        "type": "calendar_error",
+        "error": "Unsupported calendar action."
     }
-
-
-# ============================================================
-# Test
-# ============================================================
-
-if __name__ == "__main__":
-
-    action = input(
-        "Enter calendar action: "
-    ).strip()
-
-    result = handle_calendar_action(action)
-
-    print("\nCalendar Agent Result:")
-    print(result)

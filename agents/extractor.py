@@ -1,3 +1,4 @@
+import json
 import requests
 
 from models.schemas import (
@@ -7,74 +8,24 @@ from models.schemas import (
 )
 
 
-# ============================================================
-# Ollama Configuration
-# ============================================================
-
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen2.5:1.5b"
+
+EXTRACTION_MODEL = "qwen2.5:1.5b"
 
 
 # ============================================================
-# Calendar Parameter Extraction
+# Generic Ollama Request
 # ============================================================
 
-def extract_calendar_parameters(
-    user_request: str
-) -> CalendarParameters:
-
-    prompt = f"""
-You are a parameter extraction agent.
-
-Extract calendar-related information from the user's request.
-
-Extract:
-
-- person
-- date_reference
-- time
-- title
-
-Rules:
-
-1. Do not invent information.
-2. If a value is not present, return null.
-3. Keep relative dates such as "tomorrow",
-   "next Monday", or "next week" exactly as written.
-4. Return the time in HH:MM format when possible.
-5. Return ONLY valid JSON.
-
-Example:
-
-User:
-"Find Rahul's meeting tomorrow at 10 AM"
-
-Return:
-
-{{
-    "person": "Rahul",
-    "date_reference": "tomorrow",
-    "time": "10:00",
-    "title": null
-}}
-
-User request:
-
-{user_request}
-
-Return ONLY JSON.
-"""
-
-    payload = {
-        "model": MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json"
-    }
+def _call_ollama(prompt: str) -> dict:
 
     response = requests.post(
         OLLAMA_URL,
-        json=payload,
+        json={
+            "model": EXTRACTION_MODEL,
+            "prompt": prompt,
+            "stream": False
+        },
         timeout=120
     )
 
@@ -82,11 +33,182 @@ Return ONLY JSON.
 
     data = response.json()
 
-    raw_output = data["response"]
+    return data
 
-    return CalendarParameters.model_validate_json(
-        raw_output
+
+# ============================================================
+# Clean JSON Response
+# ============================================================
+
+def _parse_json(response_text: str) -> dict:
+
+    text = response_text.strip()
+
+    # Remove markdown code fences if the model produces them.
+    if text.startswith("```"):
+
+        lines = text.splitlines()
+
+        lines = [
+            line
+            for line in lines
+            if not line.strip().startswith("```")
+        ]
+
+        text = "\n".join(lines).strip()
+
+    return json.loads(text)
+
+
+# ============================================================
+# Calendar Parameter Extraction
+# ============================================================
+
+import re
+
+
+def extract_calendar_parameters(
+    action: str
+) -> CalendarParameters:
+
+    # ========================================================
+    # Step 1 — Deterministic extraction
+    # ========================================================
+
+    person = None
+    date_reference = None
+    time = None
+    title = None
+
+    action_lower = action.lower()
+
+    # --------------------------------------------------------
+    # Extract relative date
+    # --------------------------------------------------------
+
+    date_patterns = [
+        r"\btoday\b",
+        r"\btomorrow\b",
+        r"\byesterday\b",
+        r"\bnext\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        r"\bthis\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    ]
+
+    for pattern in date_patterns:
+
+        match = re.search(
+            pattern,
+            action_lower
+        )
+
+        if match:
+
+            date_reference = match.group(0)
+
+            break
+
+    # --------------------------------------------------------
+    # Extract time
+    # --------------------------------------------------------
+
+    time_pattern = (
+        r"\b"
+        r"([0-9]{1,2}"
+        r"(?:[:.][0-9]{2})?"
+        r"\s*(?:AM|PM|am|pm))"
+        r"\b"
     )
+
+    time_match = re.search(
+        time_pattern,
+        action
+    )
+
+    if time_match:
+
+        time = time_match.group(1)
+
+    # --------------------------------------------------------
+    # Extract person
+    #
+    # Handles:
+    # "Find Rahul's meeting"
+    # "meeting with Rahul"
+    # "Rahul's meeting"
+    # --------------------------------------------------------
+
+    person_patterns = [
+        r"meeting\s+with\s+([A-Z][a-z]+)",
+        r"([A-Z][a-z]+)'s\s+meeting",
+        r"meeting\s+with\s+([A-Z][a-z]+\s+[A-Z][a-z]+)"
+    ]
+
+    for pattern in person_patterns:
+
+        match = re.search(
+            pattern,
+            action
+        )
+
+        if match:
+
+            person = match.group(1)
+
+            break
+
+    # ========================================================
+    # Step 2 — If deterministic extraction succeeded,
+    #          return the result.
+    # ========================================================
+
+    if (
+        person is not None
+        or date_reference is not None
+        or time is not None
+    ):
+
+        return CalendarParameters(
+            person=person,
+            date_reference=date_reference,
+            time=time,
+            title=title
+        )
+
+    # ========================================================
+    # Step 3 — Qwen fallback
+    # ========================================================
+
+    prompt = f"""
+Extract calendar information from this action:
+
+{action}
+
+Return ONLY JSON:
+
+{{
+    "person": null,
+    "date_reference": null,
+    "time": null,
+    "title": null
+}}
+
+Rules:
+
+- Extract a person's name if explicitly mentioned.
+- Preserve relative dates exactly.
+- Extract the explicitly mentioned time.
+- Do not calculate dates.
+- Do not invent information.
+- Return null when information is absent.
+"""
+
+    data = _call_ollama(prompt)
+
+    parsed = _parse_json(
+        data["response"]
+    )
+
+    return CalendarParameters(**parsed)
 
 
 # ============================================================
@@ -94,67 +216,40 @@ Return ONLY JSON.
 # ============================================================
 
 def extract_reminder_parameters(
-    user_request: str
+    action: str
 ) -> ReminderParameters:
 
     prompt = f"""
-Extract the reminder offset from the user's request.
+Extract the reminder offset from this action.
 
-Return:
+ACTION:
+{action}
 
-{{
-    "minutes_before": number
-}}
-
-Examples:
-
-"Remind me 30 minutes before the meeting"
-
-Return:
+Return ONLY valid JSON in this format:
 
 {{
-    "minutes_before": 30
+    "minutes_before": 0
 }}
 
-"Remind me 1 hour before the meeting"
+Rules:
 
-Return:
+1. Extract the number of minutes before the event.
+2. Example:
+   "remind me 30 minutes before the meeting"
+   -> 30
+3. Do not invent a value.
+4. If no number is provided, return 0.
 
-{{
-    "minutes_before": 60
-}}
-
-Do not invent information.
-
-Return ONLY valid JSON.
-
-User request:
-
-{user_request}
+Return JSON only.
 """
 
-    payload = {
-        "model": MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json"
-    }
+    data = _call_ollama(prompt)
 
-    response = requests.post(
-        OLLAMA_URL,
-        json=payload,
-        timeout=120
+    parsed = _parse_json(
+        data["response"]
     )
 
-    response.raise_for_status()
-
-    data = response.json()
-
-    raw_output = data["response"]
-
-    return ReminderParameters.model_validate_json(
-        raw_output
-    )
+    return ReminderParameters(**parsed)
 
 
 # ============================================================
@@ -162,95 +257,85 @@ User request:
 # ============================================================
 
 def extract_email_parameters(
-    user_request: str
+    action: str
 ) -> EmailParameters:
 
-    prompt = f"""
-Extract the main person, topic, or keyword that should be
-used when searching emails.
+    import re
 
-Return:
+    # ========================================================
+    # Deterministic extraction
+    # ========================================================
+
+    # Example:
+    # "Find emails related to Rahul's meeting"
+    #                     ↓
+    #                   Rahul
+
+    person_patterns = [
+        r"emails?\s+(?:related\s+to|from|about)\s+([A-Z][a-z]+)",
+        r"mail\s+(?:related\s+to|from|about)\s+([A-Z][a-z]+)",
+        r"([A-Z][a-z]+)'s\s+(?:emails?|mail)"
+    ]
+
+    for pattern in person_patterns:
+
+        match = re.search(
+            pattern,
+            action
+        )
+
+        if match:
+
+            return EmailParameters(
+                keyword=match.group(1)
+            )
+
+    # ========================================================
+    # Qwen fallback
+    # ========================================================
+
+    prompt = f"""
+Extract the most useful search keyword from this email action:
+
+{action}
+
+Return ONLY JSON:
 
 {{
-    "keyword": "..."
+    "keyword": null
 }}
 
-Examples:
+Rules:
 
-"Find emails from Rahul"
+1. If a person's name is mentioned, use ONLY the person's name.
+2. Do not include words such as:
+   - email
+   - emails
+   - mail
+   - meeting
+   - related
+   - find
+   - search
+3. Do not invent information.
+4. Return null if there is no clear keyword.
 
-Return:
+Example:
 
+Action:
+Find emails related to Rahul's meeting
+
+Output:
 {{
     "keyword": "Rahul"
 }}
 
-"Find emails about the project architecture"
-
-Return:
-
-{{
-    "keyword": "project architecture"
-}}
-
-Do not invent information.
-
-Return ONLY valid JSON.
-
-User request:
-
-{user_request}
+Return JSON only.
 """
 
-    payload = {
-        "model": MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json"
-    }
+    data = _call_ollama(prompt)
 
-    response = requests.post(
-        OLLAMA_URL,
-        json=payload,
-        stream=False,
-        timeout=120
+    parsed = _parse_json(
+        data["response"]
     )
 
-    response.raise_for_status()
-
-    data = response.json()
-
-    raw_output = data["response"]
-
-    return EmailParameters.model_validate_json(
-        raw_output
-    )
-
-
-# ============================================================
-# Testing
-# ============================================================
-
-if __name__ == "__main__":
-
-    request = input(
-        "Enter a calendar request: "
-    ).strip()
-
-    try:
-
-        calendar = extract_calendar_parameters(
-            request
-        )
-
-        print("\nCalendar Parameters:")
-        print(
-            calendar.model_dump_json(
-                indent=2
-            )
-        )
-
-    except Exception as e:
-
-        print("\nExtraction failed:")
-        print(e)
+    return EmailParameters(**parsed)

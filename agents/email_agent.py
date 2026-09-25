@@ -1,76 +1,101 @@
+from agents.extractor import extract_email_parameters
+
 from tools.email_tools import (
     search_emails,
     get_email_content,
     summarize_emails
 )
-# ============================================================
-# Email Agent
-# ============================================================
 
-def handle_email_action(action: str):
+
+def handle_email_action(action: str, state=None):
 
     action_lower = action.lower()
 
-
-    # --------------------------------------------------------
-    # Search emails
-    # --------------------------------------------------------
+    # ============================================================
+    # EMAIL SEARCH
+    # ============================================================
 
     if (
         "find" in action_lower
-        and "email" in action_lower
+        or "search" in action_lower
+        or "retrieve" in action_lower
     ):
 
-        # Current demo implementation
-        # We will make this dynamic later.
+        parameters = extract_email_parameters(action)
 
-        if "rahul" in action_lower:
+        keyword = parameters.keyword
 
-            emails = search_emails("Rahul")
-
+        if not keyword:
             return {
-                "type": "email_search",
-                "emails": emails
+                "type": "email_error",
+                "error": "Email search requires a keyword."
             }
 
+        emails = search_emails(keyword)
 
-    # --------------------------------------------------------
-    # Summarize emails
-    # --------------------------------------------------------
+        return {
+            "type": "email_search",
+            "parameters": parameters.model_dump(),
+            "emails": emails
+        }
 
-    if "summarize" in action_lower:
+    # ============================================================
+    # EMAIL SUMMARY
+    # ============================================================
 
-     emails = search_emails("Rahul")
+    if "summar" in action_lower:
 
-     summary = summarize_emails(emails)
+        emails = None
 
-     return {
-         "type": "email_summary",
-         "summary": summary
-    }
+        # --------------------------------------------------------
+        # First use emails from a previous step.
+        # --------------------------------------------------------
 
+        if state is not None:
+            emails = state.get("emails")
 
-    # --------------------------------------------------------
-    # Unsupported action
-    # --------------------------------------------------------
+        # --------------------------------------------------------
+        # If no previous emails exist, perform a fresh search.
+        # --------------------------------------------------------
+
+        if emails is None:
+
+            parameters = extract_email_parameters(action)
+
+            keyword = parameters.keyword
+
+            if not keyword:
+                return {
+                    "type": "email_error",
+                    "error": "Email summary requires emails or a keyword."
+                }
+
+            emails = search_emails(keyword)
+
+        # --------------------------------------------------------
+        # No emails found
+        # --------------------------------------------------------
+
+        if not emails:
+            return {
+                "type": "email_summary",
+                "summary": "No relevant emails found.",
+                "emails": []
+            }
+
+        # --------------------------------------------------------
+        # Summarize the actual emails
+        # --------------------------------------------------------
+
+        summary = summarize_emails(emails)
+
+        return {
+            "type": "email_summary",
+            "summary": summary,
+            "emails": emails
+        }
 
     return {
-        "type": "error",
-        "message": f"Unsupported email action: {action}"
+        "type": "email_error",
+        "error": "Unsupported email action."
     }
-
-
-# ============================================================
-# Test
-# ============================================================
-
-if __name__ == "__main__":
-
-    action = input(
-        "Enter email action: "
-    ).strip()
-
-    result = handle_email_action(action)
-
-    print("\nEmail Agent Result:")
-    print(result) 
